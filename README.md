@@ -34,7 +34,11 @@ The result:
 
 > **Every commit to this repository becomes the cluster state automatically.** Change the image, commit, push — Argo CD detects the drift and rolls the change out. Revert the commit — Argo CD rolls it back.
 
-The sample workload is a **Tetris** web game (`shaikmustafa/mytetrisgame`) running as a 3-replica `Deployment` exposed through a `LoadBalancer` `Service`.
+The sample workload is a containerized web app (`nikhilkotharu/sports:game`) running as a 3-replica `Deployment` exposed through a `LoadBalancer` `Service`. Changing the image tag in this repo is what drives the update and rollback flows.
+
+The application registered in Argo CD as **`myappv1`** — Healthy and Synced to `main`:
+
+![Argo CD application overview](docs/images/argocd/application-overview.png)
 
 ---
 
@@ -50,7 +54,7 @@ A single manifest file holds both objects, separated by the YAML document marker
 
 | Object | Name | Role |
 |--------|------|------|
-| **Deployment** | `tetris` | Runs 3 replicas of the Tetris container |
+| **Deployment** | `tetris` | Runs 3 replicas of the `nikhilkotharu/sports:game` container |
 | **Service** | `tetris-service` | Exposes the pods externally via a LoadBalancer |
 
 ---
@@ -60,17 +64,30 @@ A single manifest file holds both objects, separated by the YAML document marker
 GitOps keeps **Git as the single source of truth**. A controller (Argo CD) constantly compares *what is committed* against *what is actually running* and reconciles any difference.
 
 ```
-   ┌──────────────────┐        watches repo URL + path        ┌──────────────────┐
-   │   GitHub repo     │  ───────────────────────────────────► │     Argo CD       │
-   │  (this manifest)  │                                        │   (controller)    │
-   └──────────────────┘                                        └─────────┬────────┘
-            ▲                                                            │ applies desired state
-            │ git commit / push                                         ▼
-            │                                                  ┌──────────────────┐
-   ┌──────────────────┐                                        │ Kubernetes cluster│
-   │   You (developer) │  ◄──── observe pods/sync status ─────  │  Deployment + Svc │
-   └──────────────────┘            on Argo CD dashboard         └──────────────────┘
+        ┌─────────────────────┐
+        │    You (developer)  │
+        └──────────┬──────────┘
+                   │  1. git commit / push
+                   ▼
+        ┌─────────────────────┐
+        │     GitHub repo     │
+        │   (this manifest)   │
+        └──────────┬──────────┘
+                   │  2. Argo CD watches repo URL + path
+                   ▼
+        ┌─────────────────────┐
+        │       Argo CD       │
+        │     (controller)    │
+        └──────────┬──────────┘
+                   │  3. applies desired state
+                   ▼
+        ┌─────────────────────┐
+        │  Kubernetes cluster │
+        │   Deployment + Svc  │
+        └─────────────────────┘
 ```
+
+> Throughout the cycle you watch the live pods and sync status on the Argo CD dashboard, while Git stays the single source of truth.
 
 The cycle:
 
@@ -104,7 +121,7 @@ spec:
     spec:
       containers:
       - name: tetris
-        image: shaikmustafa/mytetrisgame:v1
+        image: nikhilkotharu/sports:game
         ports:
         - containerPort: 3000   # app listens on 3000
 
@@ -130,7 +147,7 @@ spec:
 | `replicas: 3` | Maintain three identical pods at all times |
 | `selector.matchLabels` | How the Deployment finds the pods it owns (`app: tetris`) |
 | `template.metadata.labels` | Labels stamped on each pod — must match the selector |
-| `image: …:v1` | The image **tag** is the knob you change to update or roll back |
+| `image: nikhilkotharu/sports:game` | The image **tag** is the knob you change to update or roll back |
 | `containerPort: 3000` | The port the application listens on inside the container |
 
 **Service fields**
@@ -142,7 +159,7 @@ spec:
 | `targetPort: 3000` | The container port traffic is forwarded to |
 | `type: LoadBalancer` | Provisions an external IP for browser access |
 
-> **The image tag is the single most important value here.** Updating `v1 → v2` triggers a rollout; reverting `v2 → v1` triggers a rollback. Both are just one-line commits.
+> **The image tag is the single most important value here.** Pushing a new tag (e.g. `game → game2`) triggers a rollout; reverting back triggers a rollback. Both are just one-line commits.
 
 ---
 
@@ -174,19 +191,20 @@ The one-time setup that wires Git to the cluster.
 
 | Setting | Value |
 |---------|-------|
+| **Application name** | `myappv1` |
 | **Repository URL** | `https://github.com/nikhilsaishankar/manifest.git` |
-| **Path** | `.` (the manifest lives at the repo root) |
+| **Path** | `/` (the manifest lives at the repo root) |
 | **Revision** | `main` |
-| **Cluster** | `https://kubernetes.default.svc` (in-cluster) |
+| **Cluster** | `in-cluster` (`https://kubernetes.default.svc`) |
 | **Namespace** | `default` |
 | **Sync policy** | Manual or Automatic |
 
 Equivalent CLI form:
 
 ```bash
-argocd app create tetris \
+argocd app create myappv1 \
   --repo https://github.com/nikhilsaishankar/manifest.git \
-  --path . \
+  --path / \
   --revision main \
   --dest-server https://kubernetes.default.svc \
   --dest-namespace default
@@ -200,13 +218,17 @@ argocd app create tetris \
 
 The three operations demonstrated with this repo. In every case **you only edit the manifest in Git** — Argo CD does the work on the cluster.
 
+Argo CD renders the live hierarchy — `Application → Service / Deployment → ReplicaSet → Pod` — with a revision (`rev`) per rollout, which is exactly what makes update and rollback observable:
+
+![Argo CD application resource tree](docs/images/argocd/application-tree.png)
+
 ### 1. Update the Image (Rolling Update)
 
 Change the image tag in `deployment-service.yml` and commit:
 
 ```diff
--        image: shaikmustafa/mytetrisgame:v1
-+        image: shaikmustafa/mytetrisgame:v2
+-        image: nikhilkotharu/sports:game
++        image: nikhilkotharu/sports:game2
 ```
 
 Argo CD applies the new Deployment spec, which performs a **rolling update**:
@@ -234,8 +256,8 @@ This is the core update flow: *new replicaset → new pod → healthy → old po
 Revert the image tag back in Git (or revert the commit):
 
 ```diff
--        image: shaikmustafa/mytetrisgame:v2
-+        image: shaikmustafa/mytetrisgame:v1
+-        image: nikhilkotharu/sports:game2
++        image: nikhilkotharu/sports:game
 ```
 
 Because the **v1 ReplicaSet already exists** from the earlier rollout, Kubernetes does not rebuild it — it scales it back up:
@@ -259,18 +281,18 @@ Deployment "tetris"
 
 **OutOfSync** means *Git and the cluster no longer match*.
 
-A common way to reach it: you roll back on the cluster (or someone changes a resource directly) so the cluster runs **v1**, while the tracked Git revision still says **v2**. Argo CD compares the two, sees they differ, and marks the Application **OutOfSync** on the dashboard.
+A common way to reach it: you roll back on the cluster (or someone changes a resource directly) so the cluster runs the **old tag**, while the tracked Git revision still says the **new tag**. Argo CD compares the two, sees they differ, and marks the Application **OutOfSync** on the dashboard.
 
 ```
-   Git revision  ──►  image: v2              ┐
-                                             ├──►  mismatch  ──►  ⚠ OutOfSync
-   Live cluster  ──►  image: v1 (rolled back) ┘
+   Git revision  ──►  image: game2            ┐
+                                              ├──►  mismatch  ──►  ⚠ OutOfSync
+   Live cluster  ──►  image: game (rolled back) ┘
 ```
 
 **Resolving it:**
 
-- Click **Sync** in the Argo CD dashboard (or `argocd app sync tetris`). Argo CD re-applies the Git desired state so the cluster matches again and the status returns to **Synced**.
-- To keep Git and cluster aligned permanently, also commit the rollback to this repo so the desired state itself reflects v1.
+- Click **Sync** in the Argo CD dashboard (or `argocd app sync myappv1`). Argo CD re-applies the Git desired state so the cluster matches again and the status returns to **Synced**.
+- To keep Git and cluster aligned permanently, also commit the rollback to this repo so the desired state itself reflects the tag you actually want running.
 - On the dashboard you can click any node (**Deployment**, **ReplicaSet**, **Pod**) to open its **full describe** — events, conditions, and the live vs. desired diff that explains *why* it is OutOfSync.
 
 ---
@@ -282,11 +304,11 @@ A common way to reach it: you roll back on the cluster (or someone changes a res
 | Command | Purpose |
 |---------|---------|
 | `argocd app list` | List registered applications |
-| `argocd app get tetris` | Show sync status, health, and resource tree |
-| `argocd app sync tetris` | Re-apply Git desired state (fixes OutOfSync) |
-| `argocd app history tetris` | List previous synced revisions |
-| `argocd app rollback tetris <id>` | Roll back to a previous synced revision |
-| `argocd app diff tetris` | Show live-vs-desired differences |
+| `argocd app get myappv1` | Show sync status, health, and resource tree |
+| `argocd app sync myappv1` | Re-apply Git desired state (fixes OutOfSync) |
+| `argocd app history myappv1` | List previous synced revisions |
+| `argocd app rollback myappv1 <id>` | Roll back to a previous synced revision |
+| `argocd app diff myappv1` | Show live-vs-desired differences |
 
 ### kubectl
 
